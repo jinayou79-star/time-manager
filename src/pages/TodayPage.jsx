@@ -405,26 +405,53 @@ function EditModal({ item, onClose, onSave }) {
 function MemoModal({ item, type, onClose }) {
   const [memo, setMemo] = useState('')
   const [file, setFile] = useState(null)
+  const [existingSession, setExistingSession] = useState(null)
+  const [fileUrl, setFileUrl] = useState(null)
   const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    loadExisting()
+  }, [])
+
+  const loadExisting = async () => {
+    const db = await getDB()
+    const store = type === 'study' ? 'studySessions' : 'routineSessions'
+    const idField = type === 'study' ? 'studyId' : 'routineId'
+    const sessions = await db.getAllFromIndex(store, idField, item.id)
+    const todaySession = sessions.find(s => s.date === todayStr)
+    if (todaySession) {
+      setExistingSession(todaySession)
+      setMemo(todaySession.memo || '')
+      if (todaySession.file) {
+        const blob = new Blob([todaySession.file.data], { type: todaySession.file.type })
+        setFileUrl(URL.createObjectURL(blob))
+      }
+    }
+  }
 
   const handleSave = async () => {
     setSaving(true)
     const db = await getDB()
-    let fileData = null
+    let fileData = existingSession?.file || null
     if (file) {
       const buffer = await file.arrayBuffer()
       fileData = { name: file.name, type: file.type, data: buffer }
     }
     const store = type === 'study' ? 'studySessions' : 'routineSessions'
     const idField = type === 'study' ? 'studyId' : 'routineId'
-    await db.add(store, {
-      [idField]: item.id,
-      date: todayStr,
-      memo,
-      file: fileData,
-      done: true,
-      createdAt: new Date().toISOString(),
-    })
+
+    if (existingSession) {
+      await db.put(store, { ...existingSession, memo, file: fileData })
+    } else {
+      await db.add(store, {
+        [idField]: item.id,
+        date: todayStr,
+        memo,
+        file: fileData,
+        done: false,
+        createdAt: new Date().toISOString(),
+      })
+    }
     setSaving(false)
     onClose()
   }
@@ -445,6 +472,14 @@ function MemoModal({ item, type, onClose }) {
         />
         <div className="mt-3">
           <label className="text-xs text-gray-400 mb-1 block">파일 첨부 (이미지/음성)</label>
+          {fileUrl && (
+            <div className="mb-2">
+              {existingSession?.file?.type?.startsWith('image/')
+                ? <img src={fileUrl} alt="첨부 이미지" className="w-full rounded-xl" />
+                : <audio controls src={fileUrl} className="w-full" />
+              }
+            </div>
+          )}
           <input
             type="file"
             accept="image/*,audio/*"
