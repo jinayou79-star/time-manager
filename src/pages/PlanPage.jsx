@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import Calendar from '../components/Calendar'
 import AddItemModal from '../components/AddItemModal'
 import { getDB } from '../db/index'
-import { Plus, Trash2 } from 'lucide-react'
+import { Plus, Trash2, Pencil, X } from 'lucide-react'
 
 const CATEGORIES = [
   { id: 'schedule', label: '일정' },
@@ -18,6 +18,7 @@ export default function PlanPage() {
   const [selectedDate, setSelectedDate] = useState(todayStr)
   const [activeCategory, setActiveCategory] = useState('schedule')
   const [showModal, setShowModal] = useState(false)
+  const [editModal, setEditModal] = useState(null)
   const [items, setItems] = useState([])
 
   useEffect(() => {
@@ -68,14 +69,29 @@ export default function PlanPage() {
     loadItems()
   }
 
+  const handleEdit = async (item, newTitle) => {
+    const db = await getDB()
+    const storeMap = {
+      schedule: 'schedules',
+      todo: 'todos',
+      study: 'studies',
+      routine: 'routines',
+    }
+    await db.put(storeMap[activeCategory], { ...item, title: newTitle })
+    setEditModal(null)
+    loadItems()
+  }
+
   return (
     <div className="p-4">
       <Calendar selectedDate={selectedDate} onSelectDate={setSelectedDate} />
+
       <div className="mt-6 mb-3">
         <span className="text-sm font-bold">
           {selectedDate.replace(/-/g, '.')}
         </span>
       </div>
+
       <div className="flex gap-2 mb-4">
         {CATEGORIES.map(cat => (
           <button
@@ -90,6 +106,7 @@ export default function PlanPage() {
           </button>
         ))}
       </div>
+
       <div className="space-y-2">
         {items.length === 0 ? (
           <div className="text-sm text-gray-300 text-center py-8">
@@ -114,16 +131,19 @@ export default function PlanPage() {
                   </p>
                 )}
               </div>
-              <button
-                onClick={() => handleDelete(item.id)}
-                className="text-gray-300 hover:text-red-400 transition-colors ml-2"
-              >
-                <Trash2 size={16} />
-              </button>
+              <div className="flex gap-2 ml-2">
+                <button onClick={() => setEditModal(item)}>
+                  <Pencil size={14} className="text-gray-300 hover:text-black" />
+                </button>
+                <button onClick={() => handleDelete(item.id)}>
+                  <Trash2 size={14} className="text-gray-300 hover:text-red-400" />
+                </button>
+              </div>
             </div>
           ))
         )}
       </div>
+
       <button
         onClick={() => setShowModal(true)}
         className="fixed bottom-20 right-4 w-12 h-12 bg-black text-white rounded-full
@@ -131,6 +151,7 @@ export default function PlanPage() {
       >
         <Plus size={22} />
       </button>
+
       {showModal && (
         <AddItemModal
           category={activeCategory}
@@ -139,6 +160,42 @@ export default function PlanPage() {
           onSave={handleSave}
         />
       )}
+
+      {editModal && (
+        <EditModal
+          item={editModal}
+          onClose={() => setEditModal(null)}
+          onSave={(newTitle) => handleEdit(editModal, newTitle)}
+        />
+      )}
+    </div>
+  )
+}
+
+function EditModal({ item, onClose, onSave }) {
+  const [title, setTitle] = useState(item.title)
+  return (
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-end">
+      <div className="bg-white w-full max-w-md mx-auto rounded-t-2xl p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-bold text-base">수정</h3>
+          <button onClick={onClose}><X size={20} className="text-gray-400" /></button>
+        </div>
+        <input
+          type="text"
+          value={title}
+          onChange={e => setTitle(e.target.value)}
+          className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-black"
+          autoFocus
+        />
+        <button
+          onClick={() => onSave(title)}
+          disabled={!title.trim()}
+          className="w-full mt-4 py-3 bg-black text-white rounded-xl text-sm font-medium disabled:bg-gray-200"
+        >
+          저장
+        </button>
+      </div>
     </div>
   )
 }

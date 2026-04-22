@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { getDB } from '../db/index'
 import useTimer from '../hooks/useTimer'
-import { Play, Square, Check, Pencil, Trash2, X } from 'lucide-react'
+import { Play, Square, Check, Pencil, Trash2, X, ChevronDown, ChevronUp } from 'lucide-react'
 
 const todayStr = new Date().toISOString().split('T')[0]
 
@@ -37,50 +37,73 @@ export default function TodayPage({ nickname }) {
   useEffect(() => { loadAll() }, [])
 
   const loadAll = async () => {
-  const db = await getDB()
+    const db = await getDB()
 
-  const weekDates = getWeekDates()
-  let allSchedules = []
-  for (const date of weekDates) {
-    const s = await db.getAllFromIndex('schedules', 'date', date)
-    allSchedules = [...allSchedules, ...s]
+    // 주간 일정
+    const weekDates = getWeekDates()
+    let allSchedules = []
+    for (const date of weekDates) {
+      const s = await db.getAllFromIndex('schedules', 'date', date)
+      allSchedules = [...allSchedules, ...s]
+    }
+    setSchedules(allSchedules)
+
+    // 할일
+    const t = await db.getAllFromIndex('todos', 'date', todayStr)
+    setTodos(t)
+
+    // 학습 프로젝트 - 시작일이 오늘 이전이고 종료되지 않은 것
+    const allTimerLogs = await db.getAll('timerLogs')
+    const allStudies = await db.getAll('studies')
+    const todayStudies = allStudies.filter(s =>
+      s.startDate <= todayStr && !s.completed
+    )
+
+    const studiesWithData = await Promise.all(
+      todayStudies.map(async study => {
+        // 오늘 세션
+        const allSessions = await db.getAllFromIndex('studySessions', 'studyId', study.id)
+        const todaySession = allSessions.find(s => s.date === todayStr)
+
+        // 복습 대상 세션 (오늘 복습일인 것)
+        const reviewSessions = allSessions.filter(s =>
+          study.useReview &&
+          s.nextReviewDate === todayStr &&
+          !s.reviewDone
+        )
+
+        // 누적 타이머
+        const totalSeconds = allTimerLogs
+          .filter(l => l.refId === study.id && l.type === 'study')
+          .reduce((acc, l) => acc + l.seconds, 0)
+
+        return {
+          ...study,
+          todaySession,
+          reviewSessions,
+          totalSeconds,
+        }
+      })
+    )
+    setStudies(studiesWithData)
+
+    // 루틴
+    const allRoutines = await db.getAll('routines')
+    const todayRoutines = allRoutines.filter(r =>
+      r.startDate <= todayStr && !r.completed
+    )
+    const todayRoutinesWithDone = await Promise.all(
+      todayRoutines.map(async r => {
+        const sessions = await db.getAllFromIndex('routineSessions', 'routineId', r.id)
+        const todaySession = sessions.find(s => s.date === todayStr)
+        const total = allTimerLogs
+          .filter(l => l.refId === r.id && l.type === 'routine')
+          .reduce((acc, l) => acc + l.seconds, 0)
+        return { ...r, todayDone: !!todaySession?.done, totalSeconds: total }
+      })
+    )
+    setRoutines(todayRoutinesWithDone)
   }
-  setSchedules(allSchedules)
-
-  const t = await db.getAllFromIndex('todos', 'date', todayStr)
-  setTodos(t)
-
-  const allTimerLogs = await db.getAll('timerLogs')
-
-  const allStudies = await db.getAll('studies')
-  const todayStudies = allStudies.filter(s =>
-    s.startDate <= todayStr && !s.completed &&
-    (s.nextReviewDate <= todayStr || s.startDate === todayStr)
-  )
-  const todayStudiesWithTime = todayStudies.map(s => {
-    const total = allTimerLogs
-      .filter(l => l.refId === s.id && l.type === 'study')
-      .reduce((acc, l) => acc + l.seconds, 0)
-    return { ...s, totalSeconds: total }
-  })
-  setStudies(todayStudiesWithTime)
-
-  const allRoutines = await db.getAll('routines')
-  const todayRoutines = allRoutines.filter(r =>
-    r.startDate <= todayStr && !r.completed
-  )
-  const todayRoutinesWithDone = await Promise.all(
-    todayRoutines.map(async r => {
-      const sessions = await db.getAllFromIndex('routineSessions', 'routineId', r.id)
-      const todaySession = sessions.find(s => s.date === todayStr)
-      const total = allTimerLogs
-        .filter(l => l.refId === r.id && l.type === 'routine')
-        .reduce((acc, l) => acc + l.seconds, 0)
-      return { ...r, todayDone: !!todaySession?.done, totalSeconds: total }
-    })
-  )
-  setRoutines(todayRoutinesWithDone)
-}
 
   const handleDelete = async (id, store) => {
     const db = await getDB()
@@ -98,21 +121,6 @@ export default function TodayPage({ nickname }) {
   const handleTodoDone = async (todo) => {
     const db = await getDB()
     await db.put('todos', { ...todo, done: !todo.done })
-    loadAll()
-  }
-
-  const handleStudyComplete = async (study) => {
-    const db = await getDB()
-    const nextStep = study.reviewStep + 1
-    if (nextStep >= REVIEW_INTERVALS.length) {
-      await db.put('studies', { ...study, completed: true })
-    } else {
-      await db.put('studies', {
-        ...study,
-        reviewStep: nextStep,
-        nextReviewDate: addDays(todayStr, REVIEW_INTERVALS[nextStep]),
-      })
-    }
     loadAll()
   }
 
@@ -142,21 +150,35 @@ export default function TodayPage({ nickname }) {
   }
 
   const handleTimerToggle = async (id, type, title) => {
-  if (activeTimer?.id === id && activeTimer?.type === type) {
-    await stop()
-    setTimeout(() => loadAll(), 100)
-  } else {
-    if (activeTimer) {
+    if (activeTimer?.id === id && activeTimer?.type === type) {
       await stop()
+      setTimeout(() => loadAll(), 100)
+    } else {
+      if (activeTimer) await stop()
+      start(id, type, title)
     }
-    start(id, type, title)
   }
-}
+
+  const handleReviewDone = async (study, reviewSession) => {
+    const db = await getDB()
+    const nextStep = (study.reviewStep || 0) + 1
+    // 복습 세션 완료 표시
+    await db.put('studySessions', { ...reviewSession, reviewDone: true })
+    // 다음 복습일 설정
+    if (nextStep < REVIEW_INTERVALS.length) {
+      await db.put('studies', {
+        ...study,
+        reviewStep: nextStep,
+        nextReviewDate: addDays(todayStr, REVIEW_INTERVALS[nextStep]),
+      })
+    } else {
+      await db.put('studies', { ...study, reviewStep: nextStep, nextReviewDate: null })
+    }
+    loadAll()
+  }
 
   const activeTodos = todos.filter(t => !t.done)
   const doneTodos = todos.filter(t => t.done)
-  const activeStudies = studies.filter(s => !s.todayDone)
-  const doneStudies = studies.filter(s => s.todayDone)
   const activeRoutines = routines.filter(r => !r.todayDone)
   const doneRoutines = routines.filter(r => r.todayDone)
 
@@ -204,29 +226,23 @@ export default function TodayPage({ nickname }) {
         )}
       </Section>
 
-      {/* 학습 */}
+      {/* 학습 프로젝트 */}
       <Section title="학습 프로젝트">
-        {activeStudies.length === 0 && doneStudies.length === 0 ? <Empty /> : (
-          <>
-            {activeStudies.map(s => (
-              <StudyItem key={s.id} study={s}
-                activeTimer={activeTimer}
-                formatTime={formatTime}
-                onTimer={() => handleTimerToggle(s.id, 'study', s.title)}
-                onMemo={() => setMemoModal({ item: s, type: 'study' })}
-                onComplete={() => handleStudyComplete(s)}
-                onEnd={() => handleStudyEnd(s)}
-                onEdit={() => setEditModal({ item: s, store: 'studies' })}
-                onDelete={() => handleDelete(s.id, 'studies')}
-              />
-            ))}
-            {doneStudies.map(s => (
-              <StudyItem key={s.id} study={s} done
-                onEdit={() => setEditModal({ item: s, store: 'studies' })}
-                onDelete={() => handleDelete(s.id, 'studies')}
-              />
-            ))}
-          </>
+        {studies.length === 0 ? <Empty /> : (
+          studies.map(study => (
+            <StudyItem
+              key={study.id}
+              study={study}
+              activeTimer={activeTimer}
+              formatTime={formatTime}
+              onTimer={() => handleTimerToggle(study.id, 'study', study.title)}
+              onMemo={() => setMemoModal({ item: study, type: 'study' })}
+              onEnd={() => handleStudyEnd(study)}
+              onEdit={() => setEditModal({ item: study, store: 'studies' })}
+              onDelete={() => handleDelete(study.id, 'studies')}
+              onReviewDone={(rs) => handleReviewDone(study, rs)}
+            />
+          ))
         )}
       </Section>
 
@@ -247,13 +263,13 @@ export default function TodayPage({ nickname }) {
               />
             ))}
             {doneRoutines.map(r => (
-  <RoutineItem key={r.id} routine={r} done
-    activeTimer={activeTimer}
-    formatTime={formatTime}
-    onEdit={() => setEditModal({ item: r, store: 'routines' })}
-    onDelete={() => handleDelete(r.id, 'routines')}
-  />
-))}
+              <RoutineItem key={r.id} routine={r} done
+                activeTimer={activeTimer}
+                formatTime={formatTime}
+                onEdit={() => setEditModal({ item: r, store: 'routines' })}
+                onDelete={() => handleDelete(r.id, 'routines')}
+              />
+            ))}
           </>
         )}
       </Section>
@@ -309,36 +325,77 @@ function TodoItem({ todo, onDone, onEdit, onDelete, done }) {
   )
 }
 
-function StudyItem({ study, activeTimer, formatTime, onTimer, onMemo, onComplete, onEnd, onEdit, onDelete, done }) {
+function StudyItem({ study, activeTimer, formatTime, onTimer, onMemo, onEnd, onEdit, onDelete, onReviewDone }) {
   const isRunning = activeTimer?.id === study.id && activeTimer?.type === 'study'
+  const hasTodaySession = !!study.todaySession
+
   return (
-    <div className={`border border-gray-100 rounded-xl px-4 py-3 ${done ? 'opacity-40' : ''}`}>
+    <div className="border border-gray-100 rounded-xl px-4 py-3">
+      {/* 프로젝트명 + 버튼 */}
       <div className="flex items-center justify-between">
         <div className="flex-1">
-          <p className="text-sm font-medium">{study.title}</p>
-          {!done && study.useReview && (
-  <p className="text-xs text-gray-400 mt-0.5">
-    복습 {study.reviewStep + 1}단계 · {REVIEW_INTERVALS[study.reviewStep]}일 후 복습
-  </p>
+          <p className="text-sm font-bold">{study.title}</p>
+          {study.todaySession?.subtitle && (
+            <p className="text-xs text-gray-500 mt-0.5">오늘: {study.todaySession.subtitle}</p>
+          )}
+          {isRunning && (
+            <p className="text-xs font-mono text-black mt-1">{formatTime(activeTimer.seconds)}</p>
+          )}
+          {!isRunning && study.totalSeconds > 0 && (
+            <p className="text-xs font-mono text-gray-400 mt-0.5">누적 {formatTime(study.totalSeconds)}</p>
           )}
         </div>
         <div className="flex items-center gap-2 ml-2">
           <button onClick={onEdit}><Pencil size={14} className="text-gray-300 hover:text-black" /></button>
           <button onClick={onDelete}><Trash2 size={14} className="text-gray-300 hover:text-red-400" /></button>
-          {!done && (
-            <button onClick={onTimer}>
-              {isRunning ? <Square size={18} className="text-black" /> : <Play size={18} className="text-gray-400" />}
-            </button>
-          )}
+          <button onClick={onTimer}>
+            {isRunning
+              ? <Square size={18} className="text-black" />
+              : <Play size={18} className="text-gray-400" />}
+          </button>
         </div>
       </div>
-      {isRunning && <p className="text-xs font-mono text-black mt-2">{formatTime(activeTimer.seconds)}</p>}
-      {!isRunning && study.totalSeconds > 0 && <p className="text-xs font-mono text-gray-400 mt-1">누적 {formatTime(study.totalSeconds)}</p>}
-      {!done && (
-        <div className="flex gap-2 mt-3">
-          <button onClick={onMemo} className="text-xs border border-gray-200 rounded-lg px-3 py-1">메모</button>
-          <button onClick={onComplete} className="text-xs border border-gray-200 rounded-lg px-3 py-1">복습완료</button>
-          <button onClick={onEnd} className="text-xs border border-gray-200 rounded-lg px-3 py-1 text-gray-400">프로젝트종료</button>
+
+      {/* 오늘 기록 버튼 */}
+      <div className="flex gap-2 mt-3">
+        <button
+          onClick={onMemo}
+          className="text-xs border border-gray-200 rounded-lg px-3 py-1"
+        >
+          {hasTodaySession ? '오늘 기록 수정' : '오늘 기록 입력'}
+        </button>
+        <button
+          onClick={onEnd}
+          className="text-xs border border-gray-200 rounded-lg px-3 py-1 text-gray-400"
+        >
+          프로젝트 종료
+        </button>
+      </div>
+
+      {/* 복습 항목 */}
+      {study.reviewSessions?.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {study.reviewSessions.map(rs => (
+            <div key={rs.id} className="bg-gray-50 rounded-lg px-3 py-2">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-medium text-gray-600">
+                    🔁 복습: {rs.subtitle}
+                  </p>
+                  <p className="text-xs text-gray-400">{rs.date} 학습</p>
+                </div>
+              </div>
+              {rs.memo && (
+                <p className="text-xs text-gray-500 mt-1 line-clamp-2">{rs.memo}</p>
+              )}
+              <button
+                onClick={() => onReviewDone(rs)}
+                className="mt-2 text-xs bg-black text-white rounded-lg px-3 py-1"
+              >
+                복습완료
+              </button>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -362,7 +419,9 @@ function RoutineItem({ routine, activeTimer, formatTime, onTimer, onMemo, onDone
         </div>
       </div>
       {isRunning && <p className="text-xs font-mono text-black mt-2">{formatTime(activeTimer.seconds)}</p>}
-      {!isRunning && routine.totalSeconds > 0 && <p className="text-xs font-mono text-gray-400 mt-1">누적 {formatTime(routine.totalSeconds)}</p>}
+      {!isRunning && routine.totalSeconds > 0 && (
+        <p className="text-xs font-mono text-gray-400 mt-1">누적 {formatTime(routine.totalSeconds)}</p>
+      )}
       {!done && (
         <div className="flex gap-2 mt-3">
           <button onClick={onMemo} className="text-xs border border-gray-200 rounded-lg px-3 py-1">메모</button>
@@ -403,14 +462,22 @@ function EditModal({ item, onClose, onSave }) {
 }
 
 function MemoModal({ item, type, onClose }) {
+  const [subtitle, setSubtitle] = useState('')
   const [memo, setMemo] = useState('')
   const [file, setFile] = useState(null)
   const [existingSession, setExistingSession] = useState(null)
   const [fileUrl, setFileUrl] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [recording, setRecording] = useState(false)
+  const [recordedBlob, setRecordedBlob] = useState(null)
+  const [recordedUrl, setRecordedUrl] = useState(null)
+  const [useReview, setUseReview] = useState(false)
+  const mediaRecorderRef = useRef(null)
+  const chunksRef = useRef([])
 
   useEffect(() => {
     loadExisting()
+    return () => { if (mediaRecorderRef.current) mediaRecorderRef.current.stop() }
   }, [])
 
   const loadExisting = async () => {
@@ -421,7 +488,9 @@ function MemoModal({ item, type, onClose }) {
     const todaySession = sessions.find(s => s.date === todayStr)
     if (todaySession) {
       setExistingSession(todaySession)
+      setSubtitle(todaySession.subtitle || '')
       setMemo(todaySession.memo || '')
+      setUseReview(todaySession.useReview || false)
       if (todaySession.file) {
         const blob = new Blob([todaySession.file.data], { type: todaySession.file.type })
         setFileUrl(URL.createObjectURL(blob))
@@ -429,64 +498,177 @@ function MemoModal({ item, type, onClose }) {
     }
   }
 
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mediaRecorder = new MediaRecorder(stream)
+      mediaRecorderRef.current = mediaRecorder
+      chunksRef.current = []
+      mediaRecorder.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data) }
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
+        setRecordedBlob(blob)
+        setRecordedUrl(URL.createObjectURL(blob))
+        stream.getTracks().forEach(t => t.stop())
+      }
+      mediaRecorder.start()
+      setRecording(true)
+    } catch {
+      alert('마이크 권한이 필요해요!')
+    }
+  }
+
+  const stopRecording = () => {
+    mediaRecorderRef.current?.stop()
+    setRecording(false)
+  }
+
   const handleSave = async () => {
     setSaving(true)
     const db = await getDB()
     let fileData = existingSession?.file || null
-    if (file) {
+    if (recordedBlob) {
+      const buffer = await recordedBlob.arrayBuffer()
+      fileData = { name: 'recording.webm', type: 'audio/webm', data: buffer }
+    } else if (file) {
       const buffer = await file.arrayBuffer()
       fileData = { name: file.name, type: file.type, data: buffer }
     }
+
     const store = type === 'study' ? 'studySessions' : 'routineSessions'
     const idField = type === 'study' ? 'studyId' : 'routineId'
 
+    // 복습일 계산
+    const nextReviewDate = useReview ? addDays(todayStr, REVIEW_INTERVALS[0]) : null
+
+    const sessionData = {
+      [idField]: item.id,
+      date: todayStr,
+      subtitle,
+      memo,
+      file: fileData,
+      done: false,
+      useReview,
+      nextReviewDate,
+      reviewDone: false,
+      createdAt: new Date().toISOString(),
+    }
+
     if (existingSession) {
-      await db.put(store, { ...existingSession, memo, file: fileData })
+      await db.put(store, { ...existingSession, ...sessionData })
     } else {
-      await db.add(store, {
-        [idField]: item.id,
-        date: todayStr,
-        memo,
-        file: fileData,
-        done: false,
-        createdAt: new Date().toISOString(),
+      await db.add(store, sessionData)
+    }
+
+    // 학습 프로젝트에 복습일 업데이트
+    if (type === 'study' && useReview) {
+      const study = await db.get('studies', item.id)
+      await db.put('studies', {
+        ...study,
+        nextReviewDate,
+        reviewStep: 0,
       })
     }
+
     setSaving(false)
     onClose()
   }
 
   return (
     <div className="fixed inset-0 bg-black/40 z-50 flex items-end">
-      <div className="bg-white w-full max-w-md mx-auto rounded-t-2xl p-6">
+      <div className="bg-white w-full max-w-md mx-auto rounded-t-2xl p-6 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="font-bold text-base">{item.title} — 메모</h3>
+          <h3 className="font-bold text-base">{item.title}</h3>
           <button onClick={onClose} className="text-gray-400 text-sm">닫기</button>
         </div>
-        <textarea
-          value={memo}
-          onChange={e => setMemo(e.target.value)}
-          placeholder="오늘 내용을 기록하세요"
-          rows={5}
-          className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-black resize-none"
-        />
-        <div className="mt-3">
-          <label className="text-xs text-gray-400 mb-1 block">파일 첨부 (이미지/음성)</label>
-          {fileUrl && (
-            <div className="mb-2">
-              {existingSession?.file?.type?.startsWith('image/')
-                ? <img src={fileUrl} alt="첨부 이미지" className="w-full rounded-xl" />
-                : <audio controls src={fileUrl} className="w-full" />
-              }
+
+        <div className="space-y-4">
+          {/* 소제목 (학습만) */}
+          {type === 'study' && (
+            <div>
+              <label className="text-xs text-gray-400 mb-1 block">소제목 (오늘 공부한 것)</label>
+              <input
+                type="text"
+                value={subtitle}
+                onChange={e => setSubtitle(e.target.value)}
+                placeholder="예: 1단원 방정식"
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-black"
+              />
             </div>
           )}
-          <input
-            type="file"
-            accept="image/*,audio/*"
-            onChange={e => setFile(e.target.files[0])}
-            className="text-xs text-gray-500"
-          />
+
+          {/* 메모 */}
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">메모</label>
+            <textarea
+              value={memo}
+              onChange={e => setMemo(e.target.value)}
+              placeholder="오늘 내용을 기록하세요"
+              rows={4}
+              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-black resize-none"
+            />
+          </div>
+
+          {/* 복습 여부 (학습만) */}
+          {type === 'study' && (
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium">복습 설정</p>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  {useReview ? '1→3→7→14→30일 후 복습' : '복습 없음'}
+                </p>
+              </div>
+              <button
+                onClick={() => setUseReview(v => !v)}
+                className={`w-11 h-6 rounded-full transition-colors relative
+                  ${useReview ? 'bg-black' : 'bg-gray-200'}`}
+              >
+                <span className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all
+                  ${useReview ? 'left-6' : 'left-1'}`} />
+              </button>
+            </div>
+          )}
+
+          {/* 음성 녹음 */}
+          <div>
+            <label className="text-xs text-gray-400 mb-2 block">음성 녹음</label>
+            <div className="flex items-center gap-3">
+              {!recording ? (
+                <button
+                  onClick={startRecording}
+                  className="flex items-center gap-2 px-4 py-2 border border-gray-200 rounded-lg text-sm"
+                >
+                  🎙️ 녹음 시작
+                </button>
+              ) : (
+                <button
+                  onClick={stopRecording}
+                  className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded-lg text-sm animate-pulse"
+                >
+                  ⏹ 녹음 중지
+                </button>
+              )}
+            </div>
+            {(recordedUrl || (fileUrl && existingSession?.file?.type?.startsWith('audio/'))) && (
+              <audio controls src={recordedUrl || fileUrl} className="w-full mt-2" />
+            )}
+          </div>
+
+          {/* 이미지 첨부 */}
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">이미지 첨부</label>
+            {fileUrl && existingSession?.file?.type?.startsWith('image/') && (
+              <img src={fileUrl} alt="첨부 이미지" className="w-full rounded-xl mb-2" />
+            )}
+            <input
+              type="file"
+              accept="image/*"
+              onChange={e => setFile(e.target.files[0])}
+              className="text-xs text-gray-500"
+            />
+          </div>
         </div>
+
         <button
           onClick={handleSave}
           disabled={saving}

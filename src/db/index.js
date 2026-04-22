@@ -1,11 +1,11 @@
 import { openDB } from 'idb'
 
 const DB_NAME = 'time-manager'
-const DB_VERSION = 1
+const DB_VERSION = 2
 
 export const initDB = async () => {
   return openDB(DB_NAME, DB_VERSION, {
-    upgrade(db) {
+    upgrade(db, oldVersion) {
       // 일정
       if (!db.objectStoreNames.contains('schedules')) {
         const s = db.createObjectStore('schedules', { keyPath: 'id', autoIncrement: true })
@@ -21,7 +21,7 @@ export const initDB = async () => {
         const st = db.createObjectStore('studies', { keyPath: 'id', autoIncrement: true })
         st.createIndex('startDate', 'startDate')
       }
-      // 학습 세션 (날짜별 메모/파일/타이머)
+      // 학습 세션
       if (!db.objectStoreNames.contains('studySessions')) {
         const ss = db.createObjectStore('studySessions', { keyPath: 'id', autoIncrement: true })
         ss.createIndex('studyId', 'studyId')
@@ -31,7 +31,7 @@ export const initDB = async () => {
       if (!db.objectStoreNames.contains('routines')) {
         db.createObjectStore('routines', { keyPath: 'id', autoIncrement: true })
       }
-      // 루틴 세션 (날짜별 메모/파일/타이머)
+      // 루틴 세션
       if (!db.objectStoreNames.contains('routineSessions')) {
         const rs = db.createObjectStore('routineSessions', { keyPath: 'id', autoIncrement: true })
         rs.createIndex('routineId', 'routineId')
